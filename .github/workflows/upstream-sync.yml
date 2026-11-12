@@ -1,0 +1,65 @@
+name: Sync from upstream (aronhy/pibrowse)
+
+# Keeps this mirror in lock-step with https://github.com/aronhy/pibrowse
+# Runs every 6 hours and on demand (Actions tab -> Run workflow).
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"   # every 6 hours (UTC)
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout mirror
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Fetch upstream and mirror main + tags
+        run: |
+          set -euo pipefail
+          git config user.name  "upstream-sync-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git remote add upstream https://github.com/aronhy/pibrowse.git || true
+          git fetch upstream --tags --prune --force
+
+          UP="$(git rev-parse upstream/main)"
+          echo "upstream/main = $UP"
+
+          # Files this mirror adds on top of upstream; never overwritten by a sync.
+          KEEP=(".github/workflows/upstream-sync.yml" "sync-upstream.ps1")
+
+          # Real upstream changes, excluding our own extra files.
+          CHANGES="$(git diff --name-only HEAD "$UP" | grep -vE '^(\.github/workflows/upstream-sync\.yml|sync-upstream\.ps1)$' || true)"
+          if [ -z "$CHANGES" ]; then
+            echo "No upstream changes. Nothing to do."
+            exit 0
+          fi
+          echo "Detected upstream changes:"; echo "$CHANGES"
+
+          # Save our extra files, hard-reset to upstream, restore them, commit.
+          mkdir -p /tmp/keep
+          for f in "${KEEP[@]}"; do
+            if [ -f "$f" ]; then mkdir -p "/tmp/keep/$(dirname "$f")"; cp "$f" "/tmp/keep/$f"; fi
+          done
+          git reset --hard "$UP"
+          for f in "${KEEP[@]}"; do
+            if [ -f "/tmp/keep/$f" ]; then mkdir -p "$(dirname "$f")"; cp "/tmp/keep/$f" "$f"; fi
+          done
+          git add -A
+          git commit -m "chore: sync upstream $(echo "$UP" | cut -c1-7)"
+
+          git push --force origin main
+          git push --force --tags origin
+          echo "Sync complete."
